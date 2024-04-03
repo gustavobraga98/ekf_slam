@@ -20,6 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'lidar_reader = ekf_slam.lidar_reader:main',
+            'lidar_plotter = ekf_slam.lidar_plotter:main'
         ],
     },
 )
