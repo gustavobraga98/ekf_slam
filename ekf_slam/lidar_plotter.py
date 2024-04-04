@@ -25,11 +25,12 @@ class LidarPlotter(Node):
         points = np.column_stack([ranges * np.cos(angles), ranges * np.sin(angles)])
         points = points[~np.isnan(points).any(axis=1)]
         points = points[~np.isinf(points).any(axis=1)]
+        points = np.array([-points[:,1], points[:,0]]).T
         lines = self.ransac(points,degree_range=5)
         self.plot_lines_and_points(points, lines)
 
 
-    def ransac(self,points, degree_range=5, consensus_theshold=30, max_iterations=10000, distance_threshold=0.02, delete_threshold=0.05):
+    def ransac(self,points, degree_range=5, consensus_theshold=30, max_iterations=1000, distance_threshold=0.02, delete_threshold=0.05):
         lines = []
         epoch = 0
         print(f"points: {points}")
@@ -80,16 +81,15 @@ class LidarPlotter(Node):
     
     def plot_lines_and_points(self,points, lines):
         # Plotar os pontos
-        plt.scatter(-points[:,1], points[:,0], label='Pontos')
-
+        plt.scatter(points[:,0], points[:,1], label='Pontos')
         # Gerar um conjunto de valores x para plotar as linhas
         x_values = np.linspace(-3.5,3.5, 400)
 
         # Plotar cada linha
         for i, line in enumerate(lines):
             m, b = line
-            y_values = -(m * x_values + b)
-            plt.plot(y_values,x_values, label=f'Linha {i+1}')
+            y_values = (m * x_values + b)
+            plt.plot(x_values,y_values, label=f'Linha {i+1}')
         
         # Adicionar um triângulo no ponto (0,0) com tamanho (0.5,0.5)
         triangle = patches.RegularPolygon((0, 0), numVertices=3, radius=0.2, orientation=0, color='red')
@@ -100,7 +100,7 @@ class LidarPlotter(Node):
         plt.ylim(-3.5, 3.5)
 
         plt.draw()
-        plt.pause(0.1)
+        plt.pause(0.00001)
         plt.clf()
 
     def calculate_best_fit_line(self, points):
@@ -131,9 +131,6 @@ class LidarPlotter(Node):
         points_close_to_line = points[mask]
         
         return points_close_to_line
-    
-
-
 
 
 def main(args=None):
