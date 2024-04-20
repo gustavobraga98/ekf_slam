@@ -35,7 +35,7 @@ def main(args=None):
 
     minimal_subscriber = MinimalSubscriber()
 
-    rclpy.spin(minimal_subscriber)
+    rclpy.spin_once(minimal_subscriber)
 
     # Destroy the node explicitly
     # (optional - otherwise it will be done automatically
