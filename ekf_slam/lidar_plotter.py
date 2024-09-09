@@ -47,10 +47,10 @@ class LidarRansac(Node):
         self.robot_position = np.array([0.0, 0.0])
         self.robot_orientation = 0.0
 
-        self.current_control = np.array([0.0, 0.0])  # Atualize controle atual
-        self.state_initialized = False  # Verifique se o estado foi inicializado
+        self.current_control = np.array([0.0, 0.0])  # Inicialize controle atual
+        self.state_initialized = False  # Flag para verificar se o estado foi inicializado
         self.state = np.array([0.0, 0.0, 0.0])  # x, y, theta
-        self.P = np.eye(3)  # Covariância inicial do estado do robô
+        self.P = np.eye(3)  # Covariância inicial
 
         self.last_odom_time = None  # Inicialize o último timestamp da odometria
 
@@ -67,6 +67,8 @@ class LidarRansac(Node):
             odom_msg.pose.pose.orientation.w
         )
         roll, pitch, yaw = self.euler_from_quaternion(quaternion)
+
+        # Atualizar a posição e orientação atuais do robô
         self.robot_position = np.array([odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y])
         self.robot_orientation = yaw
 
@@ -93,19 +95,19 @@ class LidarRansac(Node):
                 # Prever a nova covariância
                 self.P = self.predict_covariance(self.P, A, Q)
 
-                ############## Atualização da Medida com Odometria ##############
+                ############## Atualização da Medida ##############
 
                 # Medida observada (odometria fornecida pelo sensor)
                 z = np.array([odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y, yaw])
                 
-                # Definir a matriz Jacobiana H (para odometria)
+                # Definir a matriz Jacobiana H
                 H = np.eye(3)
                 
                 # Definir a matriz de covariância do ruído de medida R
                 R = np.diag([0.1, 0.1, np.radians(1)])  # Exemplo de valores
                 
                 # Calcular a predição da medida (h(x))
-                h_x = self.state[:3]
+                h_x = self.state
                 
                 # Calcular a inovação (residual) y
                 y = z - h_x
@@ -114,22 +116,23 @@ class LidarRansac(Node):
                 K = self.compute_kalman_gain(self.P, H, R)
                 
                 # Atualizar o estado com o ganho de Kalman
-                self.state[:3] = self.state[:3] + K @ y
+                self.state = self.state + K @ y
                 
                 # Atualizar a covariância
                 I = np.eye(len(self.P))
                 self.P = (I - K @ H) @ self.P
 
-                ########################################
+                ###############################################
+
                 self.get_logger().info(f"Predicted State: [x: {self.state[0]:.6f}, y: {self.state[1]:.6f}, theta: {self.state[2]:.6f}]")
                 self.get_logger().info(f"Odometry State: [x: {self.robot_position[0]:.6f}, y: {self.robot_position[1]:.6f}, theta: {self.robot_orientation:.6f}]")
         
         # Atualize o último timestamp da odometria
         self.last_odom_time = current_odom_time
 
-        #################################################
-        # Processamento do LIDAR e Detecção de Linhas
-        #################################################
+        ########################################################
+        # Processamento atual do LIDAR e Odometria
+        ########################################################
 
         # Conversão dos dados LIDAR para pontos no espaço
         angle_increment = scan_msg.angle_increment
@@ -139,6 +142,7 @@ class LidarRansac(Node):
         points = points[~np.isnan(points).any(axis=1)]
         self.points = points[~np.isinf(points).any(axis=1)]
         
+
         # Transformação dos pontos para coordenadas globais
         transformed_points = self.points + self.robot_position
 
@@ -159,14 +163,10 @@ class LidarRansac(Node):
         self.temp_lines = self.group_similar_lines(self.temp_lines)
 
         # Atualizar interseções baseadas nas novas linhas temporárias
-        new_intersections = self.find_intersections(self.temp_lines)
-        self.update_intersections(new_intersections)
+        self.update_intersections(self.find_intersections(self.temp_lines))
         
         # Plotar o mapa completo com pontos e linhas temporárias
         self.plot_lines_and_points()
-        
-        # Atualize os Landmarks (interseções)
-        self.update_landmarks()
 
 
     def compute_kalman_gain(self, P, H, R):
@@ -178,89 +178,29 @@ class LidarRansac(Node):
         return A @ P @ A.T + Q
 
     def calculate_jacobian_A(self, state, control, dt):
-        x, y, theta = state[:3]
+        x, y, theta = state
         v, omega = control
-        A = np.eye(len(state))  # Dimensiona automaticamente a matriz A
-        A[:3, :3] = [
+        A = np.array([
             [1, 0, -v * np.sin(theta) * dt],
             [0, 1, v * np.cos(theta) * dt],
             [0, 0, 1]
-        ]
+        ])
         return A
-    
-    
-    def calculate_jacobian_H(self, state, landmark):
-        delta_x = landmark[0] - state[0]
-        delta_y = landmark[1] - state[1]
-        q = delta_x**2 + delta_y**2
-        sqrt_q = np.sqrt(q)
-        H = np.zeros((2, len(state)))
-        H[0, 0] = -sqrt_q * delta_x / q
-        H[0, 1] = -sqrt_q * delta_y / q
-        H[1, 0] = delta_y / q
-        H[1, 1] = -delta_x / q
-        H[:, 2] = np.array([0, -1])
-        return H
-    
-    def measurement_function(self, state, landmark):
-        delta_x = landmark[0] - state[0]
-        delta_y = landmark[1] - state[1]
-        r = np.sqrt(delta_x**2 + delta_y**2)
-        phi = np.arctan2(delta_y, delta_x) - state[2]
-        return np.array([r, phi])
-    
-    def update_landmarks(self):
-        if self.state_initialized:
-            for intersection in self.intersection_points:
-                if not self.is_landmark_known(intersection):
-                    self.add_new_landmark(intersection)
-                else:
-                    landmark_index = self.get_landmark_index(intersection)
-                    z = np.array(intersection)
-                    expected_z = self.measurement_function(self.state, self.state[landmark_index:landmark_index + 2])
-                    H = self.calculate_jacobian_H(self.state, self.state[landmark_index:landmark_index + 2])
-                    R = np.diag([0.1, np.radians(1)])
-                    y = z - expected_z
-                    K = self.compute_kalman_gain(self.P, H, R)
-                    self.state += K @ y
-                    I = np.eye(len(self.P))
-                    self.P = (I - K @ H) @ self.P
-
-    def is_landmark_known(self, landmark):
-        for known_landmark in self.state[3:].reshape(-1, 2):
-            if np.linalg.norm(known_landmark - landmark) < self.intersection_proximity_threshold:
-                return True
-        return False
-
-    def add_new_landmark(self, landmark):
-        # Ampliar o estado com o novo landmark
-        self.state = np.append(self.state, landmark)
-        
-        # Nova dimensão da matriz de covariância
-        new_size = len(self.state)
-        new_P = np.zeros((new_size, new_size))
-        new_P[:len(self.P), :len(self.P)] = self.P
-        self.P = new_P
-
-    def get_landmark_index(self, landmark):
-        for i, known_landmark in enumerate(self.state[3:].reshape(-1, 2)):
-            if np.linalg.norm(known_landmark - landmark) < self.intersection_proximity_threshold:
-                return 3 + i * 2
-        return -1
     
     def cmd_vel_callback(self, msg):
         # Atualizar o controle atual com base na mensagem Twist
         self.current_control = np.array([msg.linear.x, msg.angular.z])
 
     def predict_state(self, state, control, dt):
-        x, y, theta = state[:3]
+        x, y, theta = state
         v, omega = control
         new_x = x + v * np.cos(theta) * dt
         new_y = y + v * np.sin(theta) * dt
         new_theta = theta + omega * dt
-
+    
+        # Normalizar o ângulo entre -π e π
         new_theta = (new_theta + np.pi) % (2 * np.pi) - np.pi
-        return np.append(np.array([new_x, new_y, new_theta]), state[3:])
+        return np.array([new_x, new_y, new_theta])
 
     def euler_from_quaternion(self, quaternion):
         x = quaternion[0]
