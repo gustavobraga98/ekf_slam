@@ -80,6 +80,12 @@ class OdomNoiseNode(Node):
         self.timer = self.create_timer(1.0 / self.map_pub_rate, self.publicar_occupancy_grid)
         self.timer2 = self.create_timer(0.1, self.publicar_transformacao)
 
+        # ---- EKF SLAM ---- #
+        self.state = np.array([self.x, self.y, self.theta])
+        self.covariance = np.eye(3) * 0.1
+        self.motion_noise = np.diag([0.1, 0.1, np.deg2rad(1)])**2
+        self.sensor_noise = np.diag([0.1, 0.1])**2
+
         # Log
         self.get_logger().info(f"Occupancy Grid iniciada com {self.grid_width}x{self.grid_height} células.")
 
@@ -112,25 +118,68 @@ class OdomNoiseNode(Node):
     def sync_callback(self, scan_msg, odom_msg):
         """
         Callback que é chamado com dados sincronizados de LIDAR e Odometria.
-        Atualizará a posição do robô com base na odometria.
+        Atualizará a posição do robô com base na odometria usando filtro de Kalman.
         """
+        # ---- PREDIÇÃO USANDO FILTRO DE KALMAN E ODOMETRIA ---- #
+        delta_x = odom_msg.pose.pose.position.x - self.state[0]
+        delta_y = odom_msg.pose.pose.position.y - self.state[1]
+        delta_theta = self.get_yaw_from_quaternion(odom_msg.pose.pose.orientation) - self.state[2]
+        control_input = np.array([delta_x, delta_y, delta_theta])
+        self.state, self.covariance = self.kalman_predict(self.state, self.covariance, control_input, self.motion_noise)
 
-        # ---- PREDIÇÃO USANDO ODOMETRIA ---- #
-        
-        # 1. Extrair a posição do robô a partir da odometria (pose.pose.position)
-        self.x = odom_msg.pose.pose.position.x
-        self.y = odom_msg.pose.pose.position.y
-        
-        # 2. Converter a orientação do robô (quaternion -> yaw) usando a função apropriada
-        self.theta = self.get_yaw_from_quaternion(odom_msg.pose.pose.orientation)
+        # ---- CORREÇÃO USANDO DADOS DO LIDAR ---- #
+        # Ponto médio do LiDAR como uma simulação simples (considerar melhorias posteriores)
+        z = np.array([self.x, self.y])
+
+        self.state, self.covariance = self.kalman_update(self.state, self.covariance, z, self.sensor_noise)
 
         # Log de saída para verificar se estamos recebendo corretamente os dados
-        self.get_logger().info(f"Pose Atualizada com Odometria - x: {self.x}, y: {self.y}, theta: {self.theta} graus")
-        
+        self.get_logger().info(f"Estado corrigido: x: {self.state[0]}, y: {self.state[1]}, theta: {np.rad2deg(self.state[2])} graus")
+
         # ---- ATUALIZE O MAPA USANDO OS DADOS DO LIDAR ---- #
-        # Vamos converter a posição do robô para a grade e garantir que estamos chamando esta função
-        self.posicao_robô_x, self.posicao_robô_y = self.transformar_coordenadas_para_grid(self.x, self.y)
+        self.posicao_robô_x, self.posicao_robô_y = self.transformar_coordenadas_para_grid(self.state[0], self.state[1])
         self.atualizar_mapa_lidar(scan_msg, self.posicao_robô_x, self.posicao_robô_y)
+
+    def kalman_predict(self, state, covariance, control_input, motion_noise):
+        """
+        Fase de predição do Filtro de Kalman.
+        Prediz o estado baseado no controle aplicado.
+        """
+        # Atualizar o estado com o controle
+        state = state + control_input
+
+        # Modelo de movimento - linear aproximação
+        F = np.eye(3)  # Matriz de transição de estado
+
+        # Atualização da covariância
+        covariance = F @ covariance @ F.T + motion_noise
+        
+        return state, covariance
+
+    def kalman_update(self, state, covariance, z, R):
+        """
+        Fase de correção do Filtro de Kalman.
+        'z' são as medições do LiDAR; 'R' é a matriz de ruído da observação.
+        """
+        H = np.eye(3)[:2, :]  # Matriz de observação - seleciona x, y para atualização
+
+        # Calcular o erro de inovação
+        y = z - H @ state
+
+        # Calcular a matriz de inovação
+        S = H @ covariance @ H.T + R
+
+        # Calcular o ganho de Kalman
+        K = covariance @ H.T @ np.linalg.inv(S)
+
+        # Atualizar o estado
+        state = state + K @ y
+
+        # Atualizar a covariância
+        I = np.eye(covariance.shape[0])
+        covariance = (I - K @ H) @ covariance
+
+        return state, covariance
 
     def transformar_coordenadas_para_grid(self, x_mundo_real, y_mundo_real):
         """
