@@ -86,59 +86,68 @@ class OdomNoiseNode(Node):
         self.motion_noise = np.diag([0.1, 0.1, np.deg2rad(1)])**2
         self.sensor_noise = np.diag([0.1, 0.1])**2
 
+        # Contador para ignorar as primeiras medições
+        self.leituras_ignoradas = 0
+        self.leituras_para_ignorar = 10  # Número de leituras que você quer ignorar
+
         # Log
         self.get_logger().info(f"Occupancy Grid iniciada com {self.grid_width}x{self.grid_height} células.")
 
     def publicar_transformacao(self):
         """
-        Publica a transformação estática de odom->map
+        Publica a transformação dinâmica de map -> odom,
+        baseada na estimativa corrigida do robô.
         """
-        # Criamos uma transformação estática entre o `map` e o `odom`
         t = TransformStamped()
 
         # Preencha com timestamp
         t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = "map"  # Frame de referência mapeada será o 'map'
-        t.child_frame_id = "odom"  # 'odom' será a child frame
+        t.header.frame_id = "map"
+        t.child_frame_id = "odom"
 
-        # A transformação (Translations e Rotations)
-        # Aqui nós definimos uma transformação neutra (sem deslocamento e sem rotação)
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.0
+        # Use a posição estimada pelo EKF para a transformação
+        t.transform.translation.x = self.state[0]
+        t.transform.translation.y = self.state[1]
         t.transform.translation.z = 0.0
         t.transform.rotation.x = 0.0
         t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
-        t.transform.rotation.w = 1.0
+        t.transform.rotation.z = np.sin(self.state[2] / 2)
+        t.transform.rotation.w = np.cos(self.state[2] / 2)
 
         # Publicar a transformação
         self.tf_broadcaster.sendTransform(t)
 
     
     def sync_callback(self, scan_msg, odom_msg):
-        """
-        Callback que é chamado com dados sincronizados de LIDAR e Odometria.
-        Atualizará a posição do robô com base na odometria usando filtro de Kalman.
-        """
-        # ---- PREDIÇÃO USANDO FILTRO DE KALMAN E ODOMETRIA ---- #
-        delta_x = odom_msg.pose.pose.position.x - self.state[0]
-        delta_y = odom_msg.pose.pose.position.y - self.state[1]
-        delta_theta = self.get_yaw_from_quaternion(odom_msg.pose.pose.orientation) - self.state[2]
+        self.leituras_ignoradas += 1
+
+        # Extrair posição global usando odometria
+        global_x, global_y = self.localizar_posicao_global(odom_msg)
+
+        # PREDIÇÃO DO EKF
+        previous_state = self.state.copy()  # Salvar para comparação
+        delta_x = global_x - previous_state[0]
+        delta_y = global_y - previous_state[1]
+        delta_theta = self.get_yaw_from_quaternion(odom_msg.pose.pose.orientation) - previous_state[2]
+
         control_input = np.array([delta_x, delta_y, delta_theta])
         self.state, self.covariance = self.kalman_predict(self.state, self.covariance, control_input, self.motion_noise)
 
-        # ---- CORREÇÃO USANDO DADOS DO LIDAR ---- #
-        # Ponto médio do LiDAR como uma simulação simples (considerar melhorias posteriores)
-        z = np.array([self.x, self.y])
+        # LOG: Predição
+        self.get_logger().debug(f"Controle preditivo: delta_x={delta_x}, delta_y={delta_y}, delta_theta={np.rad2deg(delta_theta)}°")
 
+        # CORREÇÃO DO EKF
+        z = np.array([global_x, global_y])  # Medição simulada, pode-se ajustar dependendo da real medida do LiDAR
         self.state, self.covariance = self.kalman_update(self.state, self.covariance, z, self.sensor_noise)
 
-        # Log de saída para verificar se estamos recebendo corretamente os dados
-        self.get_logger().info(f"Estado corrigido: x: {self.state[0]}, y: {self.state[1]}, theta: {np.rad2deg(self.state[2])} graus")
+        # LOG: Correção
+        self.get_logger().debug(f"Estado predito: {self.state}")
 
-        # ---- ATUALIZE O MAPA USANDO OS DADOS DO LIDAR ---- #
-        self.posicao_robô_x, self.posicao_robô_y = self.transformar_coordenadas_para_grid(self.state[0], self.state[1])
-        self.atualizar_mapa_lidar(scan_msg, self.posicao_robô_x, self.posicao_robô_y)
+        # ATUALIZAÇÃO DA GRID
+        self.posicao_robô_x, self.posicao_robô_y = self.transformar_coordenadas_para_grid(global_x, global_y)
+        if self.leituras_ignoradas >= self.leituras_para_ignorar:
+            self.get_logger().debug("Atualizando mapa com LIDAR")
+            self.atualizar_mapa_lidar(scan_msg, self.posicao_robô_x, self.posicao_robô_y)
 
     def kalman_predict(self, state, covariance, control_input, motion_noise):
         """
@@ -155,15 +164,25 @@ class OdomNoiseNode(Node):
         covariance = F @ covariance @ F.T + motion_noise
         
         return state, covariance
+    
+    def localizar_posicao_global(self, odom_msg):
+        # Transformar odometria, SAX proxy for calcular a posição global mais precisa
+        return odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y
+
+    def get_yaw_from_quaternion(self, orientation_q):
+        orientation_list = [orientation_q.x, orientation_q.y, orientation_q.z, orientation_q.w]
+        (_, _, yaw) = self.euler_from_quaternion(orientation_list)
+        return yaw
 
     def kalman_update(self, state, covariance, z, R):
         """
         Fase de correção do Filtro de Kalman.
         'z' são as medições do LiDAR; 'R' é a matriz de ruído da observação.
         """
-        H = np.eye(3)[:2, :]  # Matriz de observação - seleciona x, y para atualização
-
-        # Calcular o erro de inovação
+        # Atualize H para refletir somente as estimativas de x e y
+        H = np.eye(3)[:2, :]  # Selecionando apenas os dois primeiros componentes do estado para a atualização
+        
+        # Calcular o erro de inovação somente no espaço de observação
         y = z - H @ state
 
         # Calcular a matriz de inovação
@@ -182,9 +201,6 @@ class OdomNoiseNode(Node):
         return state, covariance
 
     def transformar_coordenadas_para_grid(self, x_mundo_real, y_mundo_real):
-        """
-        Converte coordenadas do 'mundo real' (odometria) para células do Occupancy Grid.
-        """
         x_grid = int(x_mundo_real / self.grid_res) + self.origin_x
         y_grid = int(y_mundo_real / self.grid_res) + self.origin_y
         return x_grid, y_grid
@@ -263,29 +279,29 @@ class OdomNoiseNode(Node):
 
     def atualizar_mapa_lidar(self, scan_msg, posicao_robô_x, posicao_robô_y):
         """
-        Projeta as leituras do LIDAR no mapa (Occupancy Grid),
+        Projeta as leituras do LiDAR no mapa (Occupancy Grid),
         atualizando as células e expandindo a grid se necessário.
         """
         self.verificar_expansao_grid()
 
         angulo_inicial = scan_msg.angle_min
         incremento_angular = scan_msg.angle_increment
-
-        self.get_logger().info(f"LIDAR ranges count: {len(scan_msg.ranges)}, range_min: {scan_msg.range_min}, range_max: {scan_msg.range_max}, angle_min: {scan_msg.angle_min}, angle_increment: {scan_msg.angle_increment}")
-
-        ocupadas = 0  # Contador para saber quantas células estamos marcando
+        
+        # Inicialize a variável `ocupadas`
+        ocupadas = 0
 
         for i, distancia in enumerate(scan_msg.ranges):
+            # Ignorar leituras inválidas
             if distancia <= scan_msg.range_min or distancia >= scan_msg.range_max:
-                self.get_logger().debug(f"Dado LIDAR inválido - distância: {distancia}")
-                continue  # Se o dado for inválido, ignoramos
+                continue
 
             angulo_atual = angulo_inicial + i * incremento_angular
-            x_obstaculo = self.x + distancia * np.cos(self.theta + angulo_atual)
-            y_obstaculo = self.y + distancia * np.sin(self.theta + angulo_atual)
 
-            self.get_logger().debug(f"LIDAR coordenadas no mundo: x_obstaculo = {x_obstaculo}, y_obstaculo = {y_obstaculo}")
+            # Coordenadas no mundo real do ponto de final de leitura do LiDAR
+            x_obstaculo = self.state[0] + distancia * np.cos(self.state[2] + angulo_atual)
+            y_obstaculo = self.state[1] + distancia * np.sin(self.state[2] + angulo_atual)
 
+            # Converte coordenadas do mundo real para o grid
             ix_grid = int((x_obstaculo / self.grid_res) + self.origin_x)
             iy_grid = int((y_obstaculo / self.grid_res) + self.origin_y)
 
@@ -295,15 +311,15 @@ class OdomNoiseNode(Node):
                 self.get_logger().debug(f"Coordenadas fora do grid: ix_grid = {ix_grid}, iy_grid = {iy_grid}")
                 continue  # Pula se os valores projetados estiverem fora do grid atual
 
-            pontos = bresenham(self.posicao_robô_x, self.posicao_robô_y, ix_grid, iy_grid)
+            # Agora o `bresenham` recebe as coordenadas do grid
+            pontos = bresenham(posicao_robô_x, posicao_robô_y, ix_grid, iy_grid)
 
             for (px, py) in pontos:
                 if 0 <= px < self.grid_width and 0 <= py < self.grid_height:
-                    self.occupancy_grid[py, px] = 0  # Marca como livre
-                    self.get_logger().debug(f"Ponto livre marcado: px = {px}, py = {py}")
+                    self.occupancy_grid[py, px] = 0  # Marca a linha como livre
 
             if 0 <= ix_grid < self.grid_width and 0 <= iy_grid < self.grid_height:
-                self.occupancy_grid[iy_grid, ix_grid] = 1  # Marca o obstáculo como ocupado
+                self.occupancy_grid[iy_grid, ix_grid] = 1  # Marca o ponto final como ocupado
                 ocupadas += 1
                 self.get_logger().debug(f"Ponto ocupado marcado: ix_grid = {ix_grid}, iy_grid = {iy_grid}")
 
