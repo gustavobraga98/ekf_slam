@@ -151,10 +151,10 @@ class GridMappingNode(Node):
         grid_msg.info.origin.position.y = -(self.origin_y * self.grid_res)
         grid_msg.info.origin.orientation.w = 1.0
 
-        # Converte log-odds para probabilidade (para o formato esperado pelo Rviz)
+        # Converte log-odds para probabilidade apenas para células alteradas
         prob_grid = 1 - 1 / (1 + np.exp(self.occupancy_grid))
         grid_data = (prob_grid * 100).astype(np.int8)
-        grid_data[prob_grid == 0.5] = -1  # Desconhecido
+        grid_data[self.occupancy_grid == 0.5] = -1  # Desconhecido
 
         grid_msg.data = grid_data.flatten().tolist()
         self.map_publisher.publish(grid_msg)
