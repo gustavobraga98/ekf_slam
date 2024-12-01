@@ -1,7 +1,7 @@
 from ekf_slam.utils import euler_from_quaternion, quaternion_from_euler
 import numpy as np
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Pose
+from std_msgs.msg import Header
 import rclpy
 from rclpy.node import Node
 
@@ -13,7 +13,7 @@ class EKFNode(Node):
         # Subscrição para odometria ruidosa
         self.odom_sub = self.create_subscription(Odometry, "/noisy_odom", self.odom_callback, 10)
         # Publicação para posição corrigida pelo EKF
-        self.ekf_pub = self.create_publisher(Pose, "/ekf_pos", 10)
+        self.ekf_pub = self.create_publisher(Odometry, "/ekf_odom", 10)
 
         # Estado inicial do filtro (posição e orientação)
         self.prev_position = [0.0, 0.0, 0.0]
@@ -22,9 +22,9 @@ class EKFNode(Node):
         # Covariância inicial
         self.cov_matrix = np.diag([0.1, 0.1, 0.1])
         self.error_matrix = np.diag([0.01, 0.01, 0.001])
-        
+
         # Velocidades e tempo inicial
-        self.velocity = [0.0, 0.0]
+        self.velocity = [0.0, 0.0]  # [linear, angular]
         self.prev_time = self.get_clock().now()
 
     def normalize_angle(self, angle):
@@ -63,7 +63,7 @@ class EKFNode(Node):
         # Etapas do EKF
         self.prediction(delta_time)
         self.update_state()
-        self.publish_ekf_position()
+        self.publish_ekf_odom()
 
     def prediction(self, delta_time):
         v = self.velocity[0]
@@ -104,16 +104,35 @@ class EKFNode(Node):
         self.position[2] = self.normalize_angle(self.position[2])
         self.cov_matrix = (np.eye(3) - K @ H) @ self.cov_matrix
 
-    def publish_ekf_position(self):
-        pose_msg = Pose()
-        pose_msg.position.x = self.position[0]
-        pose_msg.position.y = self.position[1]
-        quat = quaternion_from_euler(0, 0, self.position[2])
-        pose_msg.orientation.x = quat[0]
-        pose_msg.orientation.y = quat[1]
-        pose_msg.orientation.z = quat[2]
-        pose_msg.orientation.w = quat[3]
-        self.ekf_pub.publish(pose_msg)
+    def publish_ekf_odom(self):
+        odom_msg = Odometry()
+
+        # Preenche o cabeçalho
+        odom_msg.header = Header()
+        odom_msg.header.stamp = self.get_clock().now().to_msg()
+        odom_msg.header.frame_id = "odom"
+
+        # Preenche os dados de posição
+        odom_msg.pose.pose.position.x = self.position[0]
+        odom_msg.pose.pose.position.y = self.position[1]
+        quat = quaternion_from_euler(self.position[2])
+        odom_msg.pose.pose.orientation.x = quat[0]
+        odom_msg.pose.pose.orientation.y = quat[1]
+        odom_msg.pose.pose.orientation.z = quat[2]
+        odom_msg.pose.pose.orientation.w = quat[3]
+
+        # Preenche a covariância da posição
+        expanded_covariance = np.zeros((6, 6))
+        expanded_covariance[:3, :3] = self.cov_matrix  # Insere a matriz \(3 \times 3\) na parte superior esquerda
+        odom_msg.pose.covariance = expanded_covariance.flatten().tolist()
+
+
+        # Preenche os dados de velocidade
+        odom_msg.twist.twist.linear.x = self.velocity[0]
+        odom_msg.twist.twist.angular.z = self.velocity[1]
+
+        # Publica a mensagem no tópico
+        self.ekf_pub.publish(odom_msg)
 
 
 def main(args=None):

@@ -1,99 +1,68 @@
-from ekf_slam.utils import euler_from_quaternion, quaternion_from_euler
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Quaternion
 import random
-import numpy as np
+from utils import (quaternion_from_euler,
+                    euler_from_quaternion)
 
 
-class OdomNoiseNode(Node):
+class NoisyOdomPublisher(Node):
     def __init__(self):
-        super().__init__('odom_noise_node')
-
-        # Publisher para odometria com ruído
-        self.noisy_odom_pub = self.create_publisher(Odometry, '/noisy_odom', 10)
-
-        # Subscriber para odometria original
-        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-
-        # Inicializa o drift (erro sistemático) nas variáveis de posição e orientação
+        super().__init__('noisy_odom_publisher')
+        self.odom_subscriber = self.create_subscription(
+            Odometry, '/odom', self.odom_callback, 10)
+        self.noisy_odom_publisher = self.create_publisher(
+            Odometry, '/noisy_odom', 10)
+        
         self.drift_x = 0.0
         self.drift_y = 0.0
-        self.drift_theta = 0.0
-
-        # Parâmetros para ruído e drift
-        self.noise_std_dev = [0.1, 0.1, 0.05]  # Desvio padrão do ruído: x, y, e theta
-        self.drift_rate = [0.0001, 0.0001, 0.00005]  # Taxa de drift: x, y, e theta
 
     def odom_callback(self, msg):
-        # Aplica ruído e drift na odometria
         noisy_odom = self.add_noise_to_odom(msg)
-        noisy_odom = self.apply_drift(noisy_odom)
-
-        # Publica odometria com ruído
-        self.noisy_odom_pub.publish(noisy_odom)
+        self.noisy_odom_publisher.publish(noisy_odom)
 
     def add_noise_to_odom(self, odom_msg):
-        # Cria uma nova mensagem de odometria com ruído
         noisy_odom = Odometry()
         noisy_odom.header = odom_msg.header
+        noisy_odom.child_frame_id = odom_msg.child_frame_id
 
-        # Adiciona ruído gaussiano nas posições
-        noisy_odom.pose.pose.position.x = odom_msg.pose.pose.position.x + random.gauss(0, self.noise_std_dev[0])
-        noisy_odom.pose.pose.position.y = odom_msg.pose.pose.position.y + random.gauss(0, self.noise_std_dev[1])
+        # Posição com ruído e drift
+        noise_std_dev = 0.05
+        self.drift_x += random.uniform(-0.01, 0.01)  # Incremento de drift X
+        self.drift_y += random.uniform(-0.01, 0.01)  # Incremento de drift Y
+        noisy_odom.pose.pose.position.x = odom_msg.pose.pose.position.x + random.gauss(0, noise_std_dev) + self.drift_x
+        noisy_odom.pose.pose.position.y = odom_msg.pose.pose.position.y + random.gauss(0, noise_std_dev) + self.drift_y
 
-        # Adiciona ruído na orientação (yaw)
-        orientation = odom_msg.pose.pose.orientation
-        euler = euler_from_quaternion([orientation.x, orientation.y, orientation.z, orientation.w])
-        noisy_euler = [euler[0], euler[1], euler[2] + random.gauss(0, self.noise_std_dev[2])]
-        noisy_orientation = quaternion_from_euler(*noisy_euler)
+        # Orientação com ruído
+        original_orientation = odom_msg.pose.pose.orientation
 
-        noisy_odom.pose.pose.orientation.x = noisy_orientation[0]
-        noisy_odom.pose.pose.orientation.y = noisy_orientation[1]
-        noisy_odom.pose.pose.orientation.z = noisy_orientation[2]
-        noisy_odom.pose.pose.orientation.w = noisy_orientation[3]
+        # Passa o objeto `original_orientation` diretamente
+        original_yaw = euler_from_quaternion(original_orientation)
 
-        # Copia as velocidades
-        noisy_odom.twist = odom_msg.twist
+        noise_yaw = random.gauss(0, 0.01)  # Ruído no yaw
+        noisy_yaw = original_yaw + noise_yaw
+        noisy_quat = quaternion_from_euler(noisy_yaw)
 
+        noisy_odom.pose.pose.orientation = Quaternion(
+            x=float(noisy_quat[0]), y=float(noisy_quat[1]),
+            z=float(noisy_quat[2]), w=float(noisy_quat[3]))
+
+        # Copy linear and angular velocities
+        noisy_odom.twist.twist = odom_msg.twist.twist
         return noisy_odom
-
-    def apply_drift(self, odom_msg):
-        # Incrementa o drift nas posições e na orientação
-        self.drift_x += self.drift_rate[0]
-        self.drift_y += self.drift_rate[1]
-        self.drift_theta += self.drift_rate[2]
-
-        # Aplica o drift nas posições
-        odom_msg.pose.pose.position.x += self.drift_x
-        odom_msg.pose.pose.position.y += self.drift_y
-
-        # Aplica o drift na orientação
-        orientation = odom_msg.pose.pose.orientation
-        euler = euler_from_quaternion([orientation.x, orientation.y, orientation.z, orientation.w])
-        euler[2] += self.drift_theta
-        euler[2] = self.normalize_angle(euler[2])  # Normaliza o ângulo
-        drifted_orientation = quaternion_from_euler(*euler)
-
-        odom_msg.pose.pose.orientation.x = drifted_orientation[0]
-        odom_msg.pose.pose.orientation.y = drifted_orientation[1]
-        odom_msg.pose.pose.orientation.z = drifted_orientation[2]
-        odom_msg.pose.pose.orientation.w = drifted_orientation[3]
-
-        return odom_msg
-
-    @staticmethod
-    def normalize_angle(angle):
-        """Normaliza o ângulo para o intervalo [-pi, pi]."""
-        return np.arctan2(np.sin(angle), np.cos(angle))
-
 
 def main(args=None):
     rclpy.init(args=args)
-    node = OdomNoiseNode()
-    rclpy.spin(node)
-    rclpy.shutdown()
+    node = NoisyOdomPublisher()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
