@@ -38,7 +38,7 @@ class EKFNode(Node):
         # Covariâncias
         self.cov_matrix = np.diag([0.1, 0.1, 0.1])
         self.error_matrix = np.diag([0.1, 0.1, 0.05])
-        self.measurement_noise = np.diag([0.02, 0.02, 0.005])
+        self.measurement_noise = np.diag([0.02, 0.005])  # Ruído para [distância, ângulo]
 
         # Suavização
         self.smoothing_factor = 0.1
@@ -96,6 +96,30 @@ class EKFNode(Node):
     def normalize_angle(self, angle):
         """Normaliza ângulo para [-pi, pi]."""
         return np.arctan2(np.sin(angle), np.cos(angle))
+    
+    def calculate_observations(self):
+        """Calcula as observações reais (z_obs) a partir dos dados do LiDAR."""
+        if not self.landmarks or self.landmark_tree is None:
+            return []
+
+        observations = []
+        for landmark in self.landmarks:
+            # Transformar o marco para o sistema de coordenadas do robô
+            lx, ly = self.transform_landmark_to_world(landmark)
+            dx = lx - self.position[0]
+            dy = ly - self.position[1]
+
+            # Distância e ângulo observados
+            observed_distance = np.sqrt(dx**2 + dy**2)
+            observed_angle = self.normalize_angle(np.arctan2(dy, dx) - self.position[2])
+
+            # Adiciona ruído às observações (simulação de sensor real)
+            observed_distance += np.random.normal(0, self.measurement_noise[0, 0])
+            observed_angle += np.random.normal(0, self.measurement_noise[1, 1])
+
+            observations.append(np.array([observed_distance, observed_angle]))
+
+        return observations
 
     def prediction(self, delta_time):
         """Executa a etapa de predição do EKF."""
@@ -128,7 +152,10 @@ class EKFNode(Node):
         if not self.landmarks or self.landmark_tree is None:
             return
 
-        for landmark in self.landmarks:
+        # Calcula as observações reais (z_obs)
+        observations = self.calculate_observations()
+
+        for i, landmark in enumerate(self.landmarks):
             # Coordenadas do landmark no mundo
             lx, ly = self.transform_landmark_to_world(landmark)
 
@@ -141,11 +168,12 @@ class EKFNode(Node):
             # Observação esperada
             z_pred = np.array([predicted_distance, predicted_angle])
 
-            # Observação real (simulada com ruído, se necessário)
-            z_obs = z_pred  # Substitua por leituras reais do sensor, se aplicável.
+            # Observação real (z_obs)
+            z_obs = observations[i]
 
             # Inovação (diferença entre observação e predição)
             innovation = z_obs - z_pred
+            innovation[1] = self.normalize_angle(innovation[1])  # Normaliza o ângulo
 
             # Jacobiana H
             H = np.array([
@@ -153,13 +181,10 @@ class EKFNode(Node):
                 [dy / (predicted_distance**2), -dx / (predicted_distance**2), -1]
             ])
 
-            # Se o robô está parado, aumente a incerteza para a odometria
-            R = np.diag([0.02, 0.005])  # Confiança maior no LIDAR
-
             # Covariância da inovação
-            S = H @ self.cov_matrix @ H.T + R
+            S = H @ self.cov_matrix @ H.T + self.measurement_noise
 
-            # Ganhando de Kalman
+            # Ganho de Kalman
             K = self.cov_matrix @ H.T @ np.linalg.inv(S)
 
             # Atualiza o estado
