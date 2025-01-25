@@ -44,6 +44,8 @@ class EKFNode(Node):
         self.smoothing_factor = 0.1
         self.robot_stopped = False  # Estado do robô baseado no /cmd_vel
 
+        self.header = None
+
     def noisy_odom_callback(self, msg):
         """Captura a odometria inicial para iniciar o EKF."""
         if not self.initialized:
@@ -51,6 +53,7 @@ class EKFNode(Node):
             x = msg.pose.pose.position.x
             y = msg.pose.pose.position.y
             orientation = msg.pose.pose.orientation
+            self.header = msg.header
 
             # Chama a função para calcular o yaw
             yaw = euler_from_quaternion(orientation)  # Passa o quaternion diretamente
@@ -63,6 +66,8 @@ class EKFNode(Node):
                 self.position = np.array(initial_mean)
                 self.initialized = True  # Evita alterações futuras
                 self.get_logger().info(f"Posição inicial definida: {self.position}")
+        else:
+            self.header = msg.header
 
     def cmd_vel_callback(self, msg):
         """Atualiza a velocidade com base no /cmd_vel."""
@@ -177,16 +182,18 @@ class EKFNode(Node):
 
     def publish_ekf_odom(self):
         """Publica a odometria corrigida."""
-        odom_msg = Odometry()
-        odom_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id="odom")
-        odom_msg.pose.pose.position.x = self.position[0]
-        odom_msg.pose.pose.position.y = self.position[1]
-        quat = quaternion_from_euler(self.position[2])
-        odom_msg.pose.pose.orientation.x = quat[0]
-        odom_msg.pose.pose.orientation.y = quat[1]
-        odom_msg.pose.pose.orientation.z = quat[2]
-        odom_msg.pose.pose.orientation.w = quat[3]
-        self.ekf_pub.publish(odom_msg)
+        if self.header:
+            odom_msg = Odometry()
+            odom_msg.header = self.header
+            odom_msg.pose.pose.position.x = self.position[0]
+            odom_msg.pose.pose.position.y = self.position[1]
+            quat = quaternion_from_euler(self.position[2])
+            odom_msg.pose.pose.orientation.x = quat[0]
+            odom_msg.pose.pose.orientation.y = quat[1]
+            odom_msg.pose.pose.orientation.z = quat[2]
+            odom_msg.pose.pose.orientation.w = quat[3]
+            self.ekf_pub.publish(odom_msg)
+            self.header = None
 
     def update(self):
         """Chama a predição, atualização e publicação a cada ciclo"""

@@ -4,7 +4,8 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Header
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, TransformStamped
+from tf2_ros import TransformBroadcaster
 import numpy as np
 import math
 
@@ -31,6 +32,9 @@ class GridMappingNode(Node):
         self.lidar_subscriber = self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
         self.pose_subscriber = self.create_subscription(Odometry, '/ekf_odom', self.pose_callback, 10)
 
+        # Broadcaster de transformações TF
+        self.tf_broadcaster = TransformBroadcaster(self)
+
         # Estado do robô [x, y, theta]
         self.state = [0.0, 0.0, 0.0]
 
@@ -44,6 +48,9 @@ class GridMappingNode(Node):
         siny_cosp = 2 * (orientation.w * orientation.z + orientation.x * orientation.y)
         cosy_cosp = 1 - 2 * (orientation.y**2 + orientation.z**2)
         self.state[2] = math.atan2(siny_cosp, cosy_cosp)
+
+        # Publica a transformação entre "map" e "base_link"
+        self.publicar_transformacao()
 
         # Verifica se é necessário expandir o grid
         self.verificar_expansao_grid()
@@ -106,12 +113,8 @@ class GridMappingNode(Node):
         expandir_cima = pos_y >= self.grid_height - margem_celulas
         expandir_baixo = pos_y <= margem_celulas
 
-        # Imprime as condições de expansão para depuração
-        self.get_logger().info(f"Expandir direita: {expandir_direita}, esquerda: {expandir_esquerda}, cima: {expandir_cima}, baixo: {expandir_baixo}")
-
         if expandir_direita or expandir_esquerda or expandir_cima or expandir_baixo:
             self.expandir_grid(expandir_direita, expandir_esquerda, expandir_cima, expandir_baixo)
-
 
     def expandir_grid(self, direita, esquerda, cima, baixo):
         """Expande o grid quando necessário."""
@@ -135,8 +138,6 @@ class GridMappingNode(Node):
             self.grid_height += incremento
             self.origin_y += incremento  # Ajusta a origem
 
-            
-
     def publicar_occupancy_grid(self):
         """Publica o mapa como um OccupancyGrid para visualização no Rviz."""
         grid_msg = OccupancyGrid()
@@ -151,13 +152,41 @@ class GridMappingNode(Node):
         grid_msg.info.origin.position.y = -(self.origin_y * self.grid_res)
         grid_msg.info.origin.orientation.w = 1.0
 
-        # Converte log-odds para probabilidade apenas para células alteradas
         prob_grid = 1 - 1 / (1 + np.exp(self.occupancy_grid))
         grid_data = (prob_grid * 100).astype(np.int8)
         grid_data[self.occupancy_grid == 0.5] = -1  # Desconhecido
 
         grid_msg.data = grid_data.flatten().tolist()
         self.map_publisher.publish(grid_msg)
+
+    def publicar_transformacao(self):
+        """Publica a transformação entre o quadro 'map' e o quadro do robô."""
+        t = TransformStamped()
+
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = "map"  # Quadro fixo
+        t.child_frame_id = "base_link"  # Quadro do robô
+
+        t.transform.translation.x = self.state[0]
+        t.transform.translation.y = self.state[1]
+        t.transform.translation.z = 0.0
+
+        q = self.euler_para_quaternion(0, 0, self.state[2])
+        t.transform.rotation.x = q[0]
+        t.transform.rotation.y = q[1]
+        t.transform.rotation.z = q[2]
+        t.transform.rotation.w = q[3]
+
+        self.tf_broadcaster.sendTransform(t)
+
+    @staticmethod
+    def euler_para_quaternion(roll, pitch, yaw):
+        """Converte ângulos de Euler (roll, pitch, yaw) para quaternion."""
+        qx = np.sin(roll / 2) * np.cos(pitch / 2) * np.cos(yaw / 2) - np.cos(roll / 2) * np.sin(pitch / 2) * np.sin(yaw / 2)
+        qy = np.cos(roll / 2) * np.sin(pitch / 2) * np.cos(yaw / 2) + np.sin(roll / 2) * np.cos(pitch / 2) * np.sin(yaw / 2)
+        qz = np.cos(roll / 2) * np.cos(pitch / 2) * np.sin(yaw / 2) - np.sin(roll / 2) * np.sin(pitch / 2) * np.cos(yaw / 2)
+        qw = np.cos(roll / 2) * np.cos(pitch / 2) * np.cos(yaw / 2) + np.sin(roll / 2) * np.sin(pitch / 2) * np.sin(yaw / 2)
+        return [qx, qy, qz, qw]
 
     def transformar_coordenadas_para_grid(self, x_mundo_real, y_mundo_real):
         """Converte coordenadas do mundo real para coordenadas de grid."""
