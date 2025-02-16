@@ -55,10 +55,10 @@ class NoisyOdomPublisher(Node):
             Odometry, '/noisy_odom', 10)
 
         # Parâmetros de ruído (\(\alpha_1, \alpha_2, \alpha_3, \alpha_4\))
-        self.alpha1 = 0.001  # Ruído angular inicial
-        self.alpha2 = 0.005  # Ruído angular proporcional à translação
-        self.alpha3 = 0.2    # Ruído de translação
-        self.alpha4 = 0.001  # Ruído de translação proporcional às rotações
+        self.alpha1 = 0.01  # Reduz o impacto do ruído angular
+        self.alpha2 = 0.01
+        self.alpha3 = 0.01
+        self.alpha4 = 0.005
 
 
         # Última odometria recebida

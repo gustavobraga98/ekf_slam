@@ -36,7 +36,7 @@ class GridMappingNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # Estado do robô [x, y, theta]
-        self.state = [0.0, 0.0, 0.0]
+        self.state = [-1.9999, -0.5, 0.0]
 
     def pose_callback(self, msg):
         """Atualiza a pose estimada do robô com base no tópico de odometria."""
