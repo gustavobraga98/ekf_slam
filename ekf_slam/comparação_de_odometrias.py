@@ -31,7 +31,7 @@ class OdomPlotter(Node):
         self.odom_data.append((odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y))
         self.noisy_odom_data.append((noisy_odom_msg.pose.pose.position.x, noisy_odom_msg.pose.pose.position.y))
         self.ekf_odom_data.append((ekf_odom_msg.pose.pose.position.x, ekf_odom_msg.pose.pose.position.y))
-
+        self.get_logger().info("Odometrias recebidas")
     def calculate_metrics(self):
         if self.odom_data and self.noisy_odom_data and self.ekf_odom_data:
             # Usar o último elemento de cada vetor
@@ -75,6 +75,8 @@ class OdomPlotter(Node):
             distance_ekf = calculate_total_distance(self.ekf_odom_data)
 
             # Exibir métricas
+            print(f"Len of all data: GT: {len(self.odom_data)}, Noisy: {len(self.noisy_odom_data)}, EKF: {len(self.ekf_odom_data)}")
+            print(f"Last position of all data: GT: {gt}, Noisy: {noisy}, EKF: {ekf}")
             print(f"Erro último ponto (Simulada): {error_noisy:.4f} m")
             print(f"Erro último ponto (EKF): {error_ekf:.4f} m")
             print(f"MAE (Simulada): {mae_noisy:.4f} m, MAE (EKF): {mae_ekf:.4f} m")
