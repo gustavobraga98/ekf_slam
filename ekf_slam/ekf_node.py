@@ -5,229 +5,273 @@ from nav_msgs.msg import Odometry
 import numpy as np
 from sklearn.cluster import DBSCAN
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from scipy.linalg import block_diag
+from geometry_msgs.msg import Quaternion, PoseWithCovariance, TwistWithCovariance
 
-class EKFNode(Node):
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+import numpy as np
+from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from scipy.linalg import block_diag
+from geometry_msgs.msg import Quaternion, PoseWithCovariance, TwistWithCovariance
+
+class EKFSLAM(Node):
     def __init__(self):
-        super().__init__('EKF_node')
-
-        # Subscrições e Publicações
-        self.lidar_sub = self.create_subscription(LaserScan, "/scan", self.lidar_callback, 10)
-        self.odom_sub = self.create_subscription(Odometry, "/noisy_odom", self.odom_callback, 10)
-        self.ekf_pub = self.create_publisher(Odometry, "/ekf_odom", 10)
-
-        # Estado inicial [x, y, theta]
-        self.initial_state = np.array([-1.9999, -0.5, 0.0])
-        self.ekf_state = self.initial_state.copy()
-
-        # Covariância inicial
-        self.P = np.diag([0.1, 0.1, np.deg2rad(5)])
-
-        # Lista de marcos conhecidos
-        self.known_landmarks = []
-        self.last_odom_time = None
-        plt.ion()  # Modo interativo
+        super().__init__('ekf_slam')
+        
+        # Configuração do EKF
+        self.state = [-1.999939, -0.5, 0]  # [x, y, theta]
+        self.P = np.eye(3) * 0.1  # Covariância inicial
+        self.landmarks = []       # Lista de marcos [x_global, y_global]
+        self.lm_cov = []          # Covariâncias dos marcos
+        
+        # Parâmetros (CORRIGIDO: Q agora 2x2)
+        self.process_noise = np.diag([0.1, 0.05])    # Q (ruído em v e w)
+        self.measurement_noise = np.diag([0.1, 0.1]) # R
+        self.max_association_distance = 0.5
+        
+        # Subscrever tópicos sincronizados
+        self.scan_sub = Subscriber(self, LaserScan, '/scan')
+        self.odom_sub = Subscriber(self, Odometry, '/noisy_odom')
+        
+        self.ts = ApproximateTimeSynchronizer(
+            [self.scan_sub, self.odom_sub],
+            queue_size=10,
+            slop=0.1
+        )
+        self.ts.registerCallback(self.sensor_callback)
+        
+        # Publicadores
+        self.odom_pub = self.create_publisher(Odometry, '/ekf_odom', 10)
+        
+        # Visualização
+        plt.ion()
         self.fig, self.ax = plt.subplots()
-        self.ax.set_xlim(-10, 10)
-        self.ax.set_ylim(-10, 10)
-        self.lidar_points_plot, = self.ax.plot([], [], 'b.', label='LIDAR Points')
-        self.landmarks_plot, = self.ax.plot([], [], 'ro', label='Landmarks')
-        self.robot_position_plot, = self.ax.plot([], [], 'go', label='Robot Position')  # Ponto verde para a posição do robô
-        self.ax.legend()
+        self.setup_plots()
 
-    def lidar_callback(self, msg: LaserScan):
+    def setup_plots(self):
+        self.ax.set_xlim(-5, 5)
+        self.ax.set_ylim(-5, 5)
+        self.scatter_lidar = self.ax.scatter([], [], c='b', s=5, label='LIDAR')
+        self.scatter_landmarks = self.ax.scatter([], [], c='r', marker='x', label='Landmarks')
+        self.robot_pose = self.ax.scatter([], [], c='g', marker='o', s=100, label='Robot')
+        self.ax.legend()
+        self.fig.canvas.draw()
+
+    def sensor_callback(self, scan_msg, odom_msg):
+        self.process_odometry(odom_msg)
+        self.process_lidar(scan_msg)
+        self.publish_odometry(odom_msg.header.stamp)
+        self.update_visualization()
+
+    def process_odometry(self, msg):
+        dt = 0.1  # Período de amostragem aproximado
+        
+        # Extrair velocidades do twist
+        v = msg.twist.twist.linear.x
+        w = msg.twist.twist.angular.z
+        
+        # Predição do EKF
+        self.state_prediction(v, w, dt)
+        self.covariance_prediction(v, w, dt)
+
+    def state_prediction(self, v, w, dt):
+        theta = self.state[2]
+        self.state += [
+            v * np.cos(theta) * dt,
+            v * np.sin(theta) * dt,
+            w * dt
+        ]
+        self.state[2] = self.normalize_angle(self.state[2])
+
+    def covariance_prediction(self, v, w, dt):
+        theta = self.state[2]
+        
+        # Matriz F do robô (3x3)
+        F_robot = np.eye(3)
+        F_robot[0,2] = -v * np.sin(theta) * dt
+        F_robot[1,2] = v * np.cos(theta) * dt
+        
+        # Matriz G do robô (3x2)
+        G_robot = np.array([
+            [np.cos(theta) * dt, 0],
+            [np.sin(theta) * dt, 0],
+            [0, dt]
+        ])
+        
+        # Expansão para marcos existentes
+        n_landmarks = len(self.landmarks) * 2
+        F = block_diag(F_robot, np.eye(n_landmarks))  # (3+2n x 3+2n)
+        G = np.vstack([G_robot, np.zeros((n_landmarks, 2))])  # (3+2n x 2)
+        
+        # Atualizar covariância (CORRIGIDO: usar Q 2x2)
+        self.P = F @ self.P @ F.T + G @ self.process_noise @ G.T
+
+    def process_lidar(self, msg):
+        clusters = self.cluster_lidar(msg)
+        if not clusters:
+            return
+        
+        # Processar medições
+        for z in clusters:
+            self.data_association(z)
+        
+        # Adicionar novos marcos
+        self.add_new_landmarks(clusters)
+
+    def cluster_lidar(self, msg):
         ranges = np.array(msg.ranges)
         angles = np.linspace(msg.angle_min, msg.angle_max, len(ranges))
-
-        # Converter medições LIDAR para coordenadas cartesianas
-        points = np.array([
-            (ranges[i] * np.cos(angles[i]), ranges[i] * np.sin(angles[i]))
-            for i in range(len(ranges)) if msg.range_min < ranges[i] < msg.range_max
-        ])
-
-        # Transformar pontos do LIDAR para o quadro global
-        global_points = self.lidar_to_global(points, self.ekf_state)
-
-        # Aplicar DBSCAN para encontrar clusters
-        db = DBSCAN(eps=0.2, min_samples=5).fit(global_points)
-        labels = db.labels_
-
-        # Calcular a posição média de cada cluster
-        unique_labels = set(labels)
+        
+        # Converter para coordenadas cartesianas
+        valid = (ranges > msg.range_min) & (ranges < msg.range_max)
+        points = np.vstack((
+            ranges[valid] * np.cos(angles[valid]),
+            ranges[valid] * np.sin(angles[valid])
+        )).T
+        
+        # Clusterização
+        if len(points) < 10:
+            return []
+        
+        dbscan = DBSCAN(eps=0.2, min_samples=5).fit(points)
         clusters = []
-        for label in unique_labels:
+        
+        for label in set(dbscan.labels_):
             if label == -1:
-                continue  # Ignorar ruído
-            cluster_points = global_points[labels == label]
-            cluster_center = np.mean(cluster_points, axis=0)
-            clusters.append(cluster_center)
-
-        # Associar clusters a marcos conhecidos
-        self.associate_landmarks_and_estimate_position(clusters)
-        self.visualize_lidar_and_landmarks(global_points, clusters)
-
-    def lidar_to_global(self, points, robot_pose):
-        # Extrair a posição e orientação do robô
-        x, y, theta = robot_pose
-
-        # Transformar para o quadro global
-        global_points = []
-        for px, py in points:
-            x_global = x + px * np.cos(theta) - py * np.sin(theta)
-            y_global = y + px * np.sin(theta) + py * np.cos(theta)
-            global_points.append((x_global, y_global))
-        
-        # Log para debugging
-        # self.get_logger().info(f"Global LIDAR Points: {global_points}")
-        
-        return np.array(global_points)
-
-    def visualize_lidar_and_landmarks(self, points, clusters):
-        # Atualizar pontos do LIDAR
-        self.lidar_points_plot.set_data(points[:, 0], points[:, 1])
-
-        # Atualizar marcos conhecidos com cores diferentes
-        if clusters:
-            clusters = np.array(clusters)
-            num_clusters = len(clusters)
-            colors = cm.rainbow(np.linspace(0, 1, num_clusters))  # Gerar cores diferentes para cada cluster
-
-            for i, cluster in enumerate(clusters):
-                self.ax.plot(cluster[0], cluster[1], 'o', color=colors[i], label=f'Cluster {i}')
-
-        # Atualizar a posição do robô
-        self.robot_position_plot.set_data([self.ekf_state[0]], [self.ekf_state[1]])  # Passar como listas de um único elemento
-
-        # Atualizar o plot
-        self.ax.set_title("LIDAR and Landmarks")
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
-        plt.pause(0.001)
-    def associate_landmarks_and_estimate_position(self, clusters):
-        for cluster in clusters:
-            dx, dy = cluster
-            theta = self.ekf_state[2]
-            global_x = self.ekf_state[0] + (dx * np.cos(theta) - dy * np.sin(theta))
-            global_y = self.ekf_state[1] + (dx * np.sin(theta) + dy * np.cos(theta))
-            global_cluster = np.array([global_x, global_y])
-
-            # Log para debugging
-            self.get_logger().info(f"Global Cluster: {global_cluster}")
-
-            if not self.known_landmarks:
-                self.known_landmarks.append(global_cluster)
                 continue
+            cluster = points[dbscan.labels_ == label]
+            clusters.append(cluster.mean(axis=0))
+        
+        return clusters
 
-            distances = [np.linalg.norm(global_cluster - known) for known in self.known_landmarks]
-            min_distance = min(distances)
-            if min_distance < 0.5:
-                closest_landmark = self.known_landmarks[np.argmin(distances)]
-                self.ekf_state[:2] = closest_landmark - cluster  # Update position directly
-            else:
-                self.known_landmarks.append(global_cluster)
+    def data_association(self, z):
+        min_dist = float('inf')
+        best_idx = -1
+        
+        for i, lm in enumerate(self.landmarks):
+            # Converter marco para coordenadas do robô
+            dx = lm[0] - self.state[0]
+            dy = lm[1] - self.state[1]
+            theta = self.state[2]
+            
+            # Transformação esperada
+            z_hat = np.array([
+                dx * np.cos(theta) + dy * np.sin(theta),
+                -dx * np.sin(theta) + dy * np.cos(theta)
+            ])
+            
+            # Calcular distância
+            innovation = z - z_hat
+            distance = np.linalg.norm(innovation)
+            
+            if distance < min_dist and distance < self.max_association_distance:
+                min_dist = distance
+                best_idx = i
+        
+        if best_idx != -1:
+            self.ekf_update(z, best_idx)
 
-        self.update(self.ekf_state[:2])
-        self.get_logger().info(f"Number of landmarks: {len(self.known_landmarks)}")
-        self.get_logger().info(f"Estimated position from LIDAR: {self.ekf_state}")
-
-    def odom_callback(self, msg: Odometry):
-        position = msg.pose.pose.position
-        orientation = msg.pose.pose.orientation
-        _, _, yaw = euler_from_quaternion([orientation.x, orientation.y, orientation.z, orientation.w])
-
-        # Calcular delta_t
-        current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self.last_odom_time is None:
-            self.last_odom_time = current_time
-            self.last_position = np.array([position.x, position.y])
-            self.last_yaw = yaw
-            return
-
-        delta_t = current_time - self.last_odom_time
-        self.last_odom_time = current_time
-
-        # Calcular velocidades linear e angular
-        delta_pos = np.array([position.x, position.y]) - self.last_position
-        self.last_position = np.array([position.x, position.y])
-        v = np.linalg.norm(delta_pos) / delta_t
-
-        delta_yaw = yaw - self.last_yaw
-        self.last_yaw = yaw
-        omega = delta_yaw / delta_t
-
-        # Passar dados de odometria e delta_t para a previsão
-        self.get_logger().info(f"Received odometry data: position=({position.x}, {position.y}), yaw={yaw}, v={v}, omega={omega}, delta_t={delta_t}")
-        self.predict(v, omega, delta_t)
-
-    def predict(self, v, omega, delta_t):
-        # Extrair dados de odometria
-        x, y, theta = self.ekf_state
-
-        # Modelo de movimento
-        x_pred = x + v * delta_t * np.cos(theta)
-        y_pred = y + v * delta_t * np.sin(theta)
-        theta_pred = theta + omega * delta_t
-
-        # Atualizar o estado previsto
-        self.ekf_state = np.array([x_pred, y_pred, theta_pred])
-
-        # Matriz Jacobiana do modelo de movimento
-        F = np.array([
-            [1, 0, -v * delta_t * np.sin(theta)],
-            [0, 1, v * delta_t * np.cos(theta)],
-            [0, 0, 1]
+    def ekf_update(self, z, lm_idx):
+        # Obter posição do marco
+        lm = self.landmarks[lm_idx]
+        
+        # Calcular Jacobiano
+        dx = lm[0] - self.state[0]
+        dy = lm[1] - self.state[1]
+        theta = self.state[2]
+        
+        H = np.array([
+            [-np.cos(theta), -np.sin(theta), -dx * np.sin(theta) + dy * np.cos(theta)],
+            [np.sin(theta), -np.cos(theta), -dx * np.cos(theta) - dy * np.sin(theta)]
         ])
-
-        # Covariância do processo
-        Q = np.diag([0.1, 0.1, np.deg2rad(1)])  # Ajuste conforme necessário
-
-        # Atualizar a covariância do estado
-        self.P = F @ self.P @ F.T + Q
-
-    def update(self, lidar_measurement):
-        z = lidar_measurement
-        z_hat = self.ekf_state[:2]
-        y = z - z_hat
-
-        H = np.array([[1, 0, 0],
-                      [0, 1, 0]])
-        R = np.diag([0.05, 0.05])
         
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
+        # Calcular inovação
+        z_hat = np.array([
+            dx * np.cos(theta) + dy * np.sin(theta),
+            -dx * np.sin(theta) + dy * np.cos(theta)
+        ])
+        innovation = z - z_hat
         
-        self.ekf_state = self.ekf_state + K @ y
-        I = np.eye(len(self.ekf_state))
-        self.P = (I - K @ H) @ self.P
+        # Atualização do EKF
+        S = H @ self.P[:3,:3] @ H.T + self.measurement_noise
+        K = self.P[:3,:3] @ H.T @ np.linalg.inv(S)
+        
+        self.state[:3] += K @ innovation
+        self.P[:3,:3] = (np.eye(3) - K @ H) @ self.P[:3,:3]
+        
+        # Garantir consistência angular
+        self.state[2] = self.normalize_angle(self.state[2])
 
-# Função auxiliar para converter quaternion para ângulos de Euler
-def euler_from_quaternion(quat):
-    x, y, z, w = quat
-    t0 = +2.0 * (w * x + y * z)
-    t1 = +1.0 - 2.0 * (x * x + y * y)
-    roll_x = np.arctan2(t0, t1)
+    def add_new_landmarks(self, clusters):
+        for z in clusters:
+            # Converter para coordenadas globais
+            x = self.state[0] + z[0] * np.cos(self.state[2]) - z[1] * np.sin(self.state[2])
+            y = self.state[1] + z[0] * np.sin(self.state[2]) + z[1] * np.cos(self.state[2])
+            
+            # Verificar se já existe
+            exists = False
+            for lm in self.landmarks:
+                if np.linalg.norm([x - lm[0], y - lm[1]]) < self.max_association_distance:
+                    exists = True
+                    break
+            
+            if not exists:
+                self.landmarks.append([x, y])
+                # Expandir covariância corretamente
+                new_cov = np.eye(2) * 0.1
+                self.P = block_diag(self.P, new_cov)
 
-    t2 = +2.0 * (w * y - z * x)
-    t2 = +1.0 if t2 > +1.0 else t2
-    t2 = -1.0 if t2 < -1.0 else t2
-    pitch_y = np.arcsin(t2)
+    def publish_odometry(self, timestamp):
+        odom = Odometry()
+        odom.header.stamp = timestamp
+        odom.header.frame_id = 'odom'
+        odom.child_frame_id = 'base_link'
+        
+        odom.pose.pose.position.x = self.state[0]
+        odom.pose.pose.position.y = self.state[1]
+        odom.pose.pose.orientation = self.yaw_to_quaternion(self.state[2])
+        
+        self.odom_pub.publish(odom)
 
-    t3 = +2.0 * (w * z + x * y)
-    t4 = +1.0 - 2.0 * (y * y + z * z)
-    yaw_z = np.arctan2(t3, t4)
+    def update_visualization(self):
+        # Atualizar posição do robô
+        self.robot_pose.set_offsets([self.state[0], self.state[1]])
+        
+        # Atualizar marcos
+        if self.landmarks:
+            landmarks = np.array(self.landmarks)
+            self.scatter_landmarks.set_offsets(landmarks)
+        
+        self.fig.canvas.draw_idle()
+        plt.pause(0.01)
 
-    return roll_x, pitch_y, yaw_z
+    @staticmethod
+    def yaw_to_quaternion(yaw):
+        q = Quaternion()
+        q.w = np.cos(yaw / 2)
+        q.z = np.sin(yaw / 2)
+        return q
+
+    @staticmethod
+    def normalize_angle(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
 def main(args=None):
     rclpy.init(args=args)
-    node = EKFNode()
+    node = EKFSLAM()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        plt.close('all')
     finally:
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
