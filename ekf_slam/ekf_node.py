@@ -21,10 +21,11 @@ class EKFSLAM(Node):
         self.lm_cov = []
         
         # Parameters
-        self.process_noise = np.diag([0.1, 0.1])       # Q (v, w)
+        self.process_noise = np.diag([0.1, 0.5])  # Mais ruído angular       # Q (v, w)
         self.measurement_noise = np.diag([0.1, 0.1])  # R
         self.max_association_distance = 1.0            # Mahalanobis threshold
         self.dt = 0.1                                  # Sampling time
+        self.is_rotating = False
         
         # ROS Subscribers
         self.scan_sub = Subscriber(self, LaserScan, '/scan')
@@ -67,40 +68,58 @@ class EKFSLAM(Node):
 
     def predict(self, v, w):
         theta = self.state[2]
-        
-        # Improved motion model
-        if abs(w) < 1e-6:
-            # Linear motion
-            self.state[0] += v * np.cos(theta) * self.dt
-            self.state[1] += v * np.sin(theta) * self.dt
-            F = np.eye(3)
-            F[0,2] = -v * np.sin(theta) * self.dt
-            F[1,2] = v * np.cos(theta) * self.dt
-        else:
-            # Circular motion
-            radius = v / w
+        self.is_rotating = abs(v) < 0.01 and abs(w) > 0.01
+
+        if self.is_rotating:
+            # Modelo de rotação pura
             dtheta = w * self.dt
-            self.state[0] += radius * (np.sin(theta + dtheta) - np.sin(theta))
-            self.state[1] += radius * (np.cos(theta) - np.cos(theta + dtheta))
             self.state[2] += dtheta
-            F = np.eye(3)
-            F[0,2] = radius * (np.cos(theta + dtheta) - np.cos(theta))
-            F[1,2] = radius * (-np.sin(theta + dtheta) + np.sin(theta))
-        
-        self.state[2] = self.normalize_angle(self.state[2])
-        
-        # Jacobian for covariance prediction
-        G = np.zeros((3, 2))
-        G[0,0] = np.cos(theta) * self.dt
-        G[1,0] = np.sin(theta) * self.dt
-        G[2,1] = self.dt
-        
-        n = len(self.landmarks) * 2
-        F_full = block_diag(F, np.eye(n))
-        G_full = np.vstack([G, np.zeros((n, 2))])
-        
-        # Covariance prediction
-        self.P = F_full @ self.P @ F_full.T + G_full @ self.process_noise @ G_full.T
+            
+            # Jacobiana simplificada
+            F = np.eye(len(self.state))
+            F[2,2] = 1.0  # Mantém covariância angular
+            
+            # Atualização da covariância
+            self.P = F @ self.P @ F.T + np.eye(len(self.state)) * 0.01
+            
+            self.get_logger().info(f"Pure rotation: dθ = {np.degrees(dtheta):.1f}°")
+        else:
+            # Improved motion model
+            if abs(w) < 1e-6:
+                # Movimento linear
+                self.state[0] += v * np.cos(theta) * self.dt
+                self.state[1] += v * np.sin(theta) * self.dt
+                F = np.eye(3)
+                F[0,2] = -v * np.sin(theta) * self.dt
+                F[1,2] = v * np.cos(theta) * self.dt
+            else:
+                # Movimento circular
+                radius = v / w
+                dtheta = w * self.dt
+                self.state[0] += radius * (np.sin(theta + dtheta) - np.sin(theta))
+                self.state[1] += radius * (np.cos(theta) - np.cos(theta + dtheta))
+                self.state[2] += dtheta
+                F = np.eye(3)
+                F[0,2] = radius * (np.cos(theta + dtheta) - np.cos(theta))
+                F[1,2] = radius * (-np.sin(theta + dtheta) + np.sin(theta))
+            
+            self.state[2] = self.normalize_angle(self.state[2])
+            
+            # Jacobian for covariance prediction
+            G = np.zeros((3, 2))
+            if self.is_rotating:
+                G[2,1] = self.dt  # Só afeta a orientação
+            else:
+                G[0,0] = np.cos(theta) * self.dt
+                G[1,0] = np.sin(theta) * self.dt
+                G[2,1] = self.dt
+            
+            n = len(self.landmarks) * 2
+            F_full = block_diag(F, np.eye(n))
+            G_full = np.vstack([G, np.zeros((n, 2))])
+            
+            # Covariance prediction
+            self.P = F_full @ self.P @ F_full.T + G_full @ self.process_noise @ G_full.T
 
     def process_lidar(self, msg):
         clusters = self.cluster_lidar(msg)
@@ -131,17 +150,26 @@ class EKFSLAM(Node):
         min_mahal = float('inf')
         best_idx = -1
         
-        for i, lm in enumerate(self.landmarks):
-            z_hat, H, S = self.compute_expected_measurement(i)
-            innovation = z - z_hat
-            mahal = innovation.T @ np.linalg.inv(S) @ innovation
-            
-            if mahal < min_mahal and mahal < self.max_association_distance:
-                min_mahal = mahal
-                best_idx = i
+        # Priorizar distância euclidiana durante rotação
+        if self.is_rotating:
+            for i, lm in enumerate(self.landmarks):
+                dist = np.linalg.norm(z - self.compute_expected_measurement(i)[0])
+                if dist < 0.3:  # Threshold reduzido
+                    return self.update(z, i)
         
-        if best_idx != -1:
-            self.update(z, best_idx)
+        # Caso contrário usar Mahalanobis normal
+        else:
+            for i, lm in enumerate(self.landmarks):
+                z_hat, H, S = self.compute_expected_measurement(i)
+                innovation = z - z_hat
+                mahal = innovation.T @ np.linalg.inv(S) @ innovation
+                
+                if mahal < min_mahal and mahal < self.max_association_distance:
+                    min_mahal = mahal
+                    best_idx = i
+            
+            if best_idx != -1:
+                self.update(z, best_idx)
 
     def compute_expected_measurement(self, lm_idx):
         lm = self.landmarks[lm_idx]
@@ -185,39 +213,61 @@ class EKFSLAM(Node):
         self.state[2] = self.normalize_angle(self.state[2])
 
     def add_new_landmarks(self, clusters):
+        theta = self.state[2]
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+        
         for z in clusters:
-            # Convert to global coordinates
-            theta = self.state[2]
-            x = self.state[0] + z[0] * np.cos(theta) - z[1] * np.sin(theta)
-            y = self.state[1] + z[0] * np.sin(theta) + z[1] * np.cos(theta)
-            
-            # Check existence using Mahalanobis distance
+            # Cálculo da posição global do landmark
+            x = self.state[0] + z[0] * cos_theta - z[1] * sin_theta
+            y = self.state[1] + z[0] * sin_theta + z[1] * cos_theta
+
+            # Verificação de existência
             exists = False
-            for i, lm in enumerate(self.landmarks):
-                _, _, S = self.compute_expected_measurement(i)
-                innovation = np.array([x - lm[0], y - lm[1]])
-                if innovation.T @ np.linalg.inv(S[:2,:2]) @ innovation < self.max_association_distance:
+            if self.landmarks:
+                landmarks_array = np.array(self.landmarks)
+                dists = np.linalg.norm(landmarks_array - [x,y], axis=1)
+                if np.any(dists < 0.5):
                     exists = True
-                    break
-            
+
             if not exists:
+                # Tamanho atual do estado antes de adicionar o novo landmark
+                current_state_size = len(self.state)
+                
+                # Jacobiano em relação ao estado atual + medição
+                J = np.zeros((2, current_state_size + 2))
+                
+                # Derivadas em relação ao estado do robô
+                J[0, 0] = 1.0  # dx/drobot_x
+                J[0, 2] = -z[0] * sin_theta - z[1] * cos_theta  # dx/dtheta
+                
+                J[1, 1] = 1.0  # dy/drobot_y
+                J[1, 2] = z[0] * cos_theta - z[1] * sin_theta  # dy/dtheta
+                
+                # Derivadas em relação à medição (z0, z1)
+                J[0, current_state_size] = cos_theta  # dx/dz0
+                J[0, current_state_size + 1] = -sin_theta  # dx/dz1
+                
+                J[1, current_state_size] = sin_theta  # dy/dz0
+                J[1, current_state_size + 1] = cos_theta  # dy/dz1
+
+                # Cálculo da covariância aumentada
+                P_aug = block_diag(self.P, self.measurement_noise)
+                P_new = J @ P_aug @ J.T
+
+                # Expansão da matriz de covariância
+                new_P = np.zeros((current_state_size + 2, current_state_size + 2))
+                new_P[:current_state_size, :current_state_size] = self.P
+                new_P[current_state_size:, current_state_size:] = P_new
+                
+                # Cross-correlação
+                cross_corr = self.P @ J[:, :current_state_size].T
+                new_P[:current_state_size, current_state_size:] = cross_corr
+                new_P[current_state_size:, :current_state_size] = cross_corr.T
+
+                self.P = new_P
                 self.landmarks.append([x, y])
-                # Extend state and covariance
                 self.state = np.concatenate([self.state, [x, y]])
-                J = np.zeros((2, len(self.state)))
-                J[0,0] = 1  # dx/drobot_x
-                J[0,2] = -z[0] * np.sin(theta) - z[1] * np.cos(theta)  # dx/dtheta
-                J[0, -2] = np.cos(theta)  # dx/dz0
-                J[0, -1] = -np.sin(theta) # dx/dz1
-                
-                J[1,1] = 1  # dy/drobot_y
-                J[1,2] = z[0] * np.cos(theta) - z[1] * np.sin(theta)  # dy/dtheta
-                J[1, -2] = np.sin(theta)  # dy/dz0
-                J[1, -1] = np.cos(theta)  # dy/dz1
-                
-                P_new = J @ block_diag(self.P, self.measurement_noise) @ J.T
-                self.P = block_diag(self.P, np.eye(2)*0.1)  # Temporary
-                self.P[-2:, -2:] = P_new
 
     def publish_odometry(self, timestamp):
         odom = Odometry()
