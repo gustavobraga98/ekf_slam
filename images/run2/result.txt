@@ -1,0 +1,10 @@
+Last position of all data: GT: (-1.592842113261046, -0.6524081871379641), Noisy: (0.5844213023108323, -0.048096070783998565), EKF: (-1.5271371118407333, -0.5605545717632662)
+Erro último ponto (Simulada): 2.2596 m
+Erro último ponto (EKF): 0.1129 m
+MAE (Simulada): 1.2510 m, MAE (EKF): 0.1347 m
+RMSE (Simulada): 1.4142 m, RMSE (EKF): 0.1450 m
+Desvio padrão (Simulada): 0.6595 m, Desvio padrão (EKF): 0.0535 m
+Desempenho relativo do EKF: 89.23%
+Distância total percorrida (GT): 9.04 m
+Distância total percorrida (Simulada): 25.04 m
+Distância total percorrida (EKF): 10.85 m
