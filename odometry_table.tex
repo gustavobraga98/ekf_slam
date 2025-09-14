@@ -1,0 +1,51 @@
+\begin{table}[H]
+\centering
+\caption{Resultados das iterações para trajetória simulada e EKF}
+\label{tab:metricas}
+\begin{tabular}{ccccccccc}
+\toprule
+Iteração & \multicolumn{2}{c}{Erro último ponto (m)} & \multicolumn{2}{c}{MAE (m)} & \multicolumn{2}{c}{RMSE (m)} & \multicolumn{2}{c}{Desvio padrão (m)} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+ & Simulada & EKF & Simulada & EKF & Simulada & EKF & Simulada & EKF \\
+\midrule
+1 & 1.0611 & 0.0947 & 0.6001 & 0.1320 & 0.6900 & 0.1402 & 0.3406 & 0.0473 \\
+2 & 1.5332 & 0.0875 & 0.4831 & 0.1282 & 0.6085 & 0.1378 & 0.3700 & 0.0507 \\
+3 & 0.3672 & 0.1212 & 0.3657 & 0.1335 & 0.3960 & 0.1442 & 0.1519 & 0.0546 \\
+4 & 0.6108 & 0.1021 & 0.3122 & 0.1388 & 0.3806 & 0.1481 & 0.2176 & 0.0518 \\
+5 & 1.1067 & 0.1157 & 0.3985 & 0.1344 & 0.5112 & 0.1450 & 0.3202 & 0.0546 \\
+6 & 0.8734 & 0.1193 & 0.5359 & 0.1339 & 0.6009 & 0.1429 & 0.2718 & 0.0500 \\
+7 & 0.4597 & 0.1224 & 0.2819 & 0.1313 & 0.3398 & 0.1411 & 0.1897 & 0.0515 \\
+8 & 0.6768 & 0.1078 & 0.5325 & 0.1374 & 0.5932 & 0.1472 & 0.2614 & 0.0530 \\
+9 & 1.2608 & 0.1070 & 0.2667 & 0.1564 & 0.4106 & 0.1763 & 0.3122 & 0.0813 \\
+10 & 0.3940 & 0.1364 & 0.1794 & 0.1397 & 0.2106 & 0.1515 & 0.1104 & 0.0586 \\
+\midrule
+Média & 0.8344 & 0.1114 & 0.3956 & 0.1365 & 0.4742 & 0.1474 & 0.2546 & 0.0553 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Desempenho relativo e distâncias percorridas}
+\label{tab:desempenho}
+\begin{tabular}{ccccc}
+\toprule
+Iteração & Desempenho relativo EKF (\%) & \multicolumn{3}{c}{Distância total percorrida (m)} \\
+\cmidrule(lr){3-5}
+ & & GT & Simulada & EKF \\
+\midrule
+1 & 78.01 & 8.88 & 10.51 & 10.39 \\
+2 & 73.47 & 8.93 & 10.73 & 10.61 \\
+3 & 63.49 & 8.93 & 10.85 & 10.46 \\
+4 & 55.56 & 9.16 & 10.66 & 10.35 \\
+5 & 66.28 & 8.97 & 10.45 & 10.31 \\
+6 & 75.03 & 9.13 & 10.42 & 10.39 \\
+7 & 53.41 & 9.12 & 10.59 & 10.17 \\
+8 & 74.20 & 9.00 & 10.47 & 10.40 \\
+9 & 41.37 & 11.03 & 12.33 & 12.40 \\
+10 & 22.15 & 9.09 & 10.53 & 10.04 \\
+\midrule
+Média & 60.30 & 9.22 & 10.75 & 10.55 \\
+\bottomrule
+\end{tabular}
+\end{table}

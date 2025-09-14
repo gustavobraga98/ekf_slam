@@ -8,21 +8,20 @@ import matplotlib.pyplot as plt
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from scipy.linalg import block_diag
 from geometry_msgs.msg import Quaternion
-import math
 
 class EKFSLAM(Node):
     def __init__(self):
         super().__init__('ekf_slam')
         
         # EKF Configuration
-        self.state = np.array([-1.999939, -0.5, 0.0])  # [x, y, theta]
+        self.state = np.array([-1.999939, -0.5, 0.0])  # [x, y, theta] inicial na simulação.
         self.P = np.eye(3) * 0.1
         self.landmarks = []
         self.lm_cov = []
         
         # Parameters
-        self.process_noise = np.diag([0.1, 0.5])  # Mais ruído angular       # Q (v, w)
-        self.measurement_noise = np.diag([0.1, 0.1])  # R
+        self.process_noise = np.diag([0.1, 0.5])
+        self.measurement_noise = np.diag([0.1, 0.1])
         self.max_association_distance = 1.0            # Mahalanobis threshold
         self.dt = 0.1                                  # Sampling time
         self.is_rotating = False
