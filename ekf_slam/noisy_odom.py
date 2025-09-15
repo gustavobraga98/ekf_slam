@@ -9,7 +9,7 @@ import random
 
 def euler_from_quaternion(quaternion):
     """
-    Converte um quaternion em ângulos de Euler (roll, pitch, yaw).
+    Converte um quaternion em angulos de Euler (roll, pitch, yaw).
     """
     x, y, z, w = quaternion
     t0 = 2.0 * (w * x + y * z)
@@ -29,7 +29,7 @@ def euler_from_quaternion(quaternion):
 
 def quaternion_from_euler(roll, pitch, yaw):
     """
-    Converte ângulos de Euler (roll, pitch, yaw) em um quaternion.
+    Converte angulos de Euler (roll, pitch, yaw) em um quaternion.
     """
     cy = math.cos(yaw * 0.5)
     sy = math.sin(yaw * 0.5)
@@ -54,14 +54,14 @@ class NoisyOdomPublisher(Node):
         self.noisy_odom_publisher = self.create_publisher(
             Odometry, '/noisy_odom', 10)
 
-        # Parâmetros de ruído (\(\alpha_1, \alpha_2, \alpha_3, \alpha_4\))
+        # Parametros de ruido (\(\alpha_1, \alpha_2, \alpha_3, \alpha_4\))
         self.alpha1 = 0.003  # Reduz o impacto do ruído angular
         self.alpha2 = 0.003
         self.alpha3 = 0.003
         self.alpha4 = 0.0006
 
 
-        # Última odometria recebida
+        # Ultima odometria recebida
         self.last_odom = None
         self.pose = [0.0, 0.0, 0.0]  # x, y, yaw
 
@@ -80,7 +80,7 @@ class NoisyOdomPublisher(Node):
                 orientation.x, orientation.y, orientation.z, orientation.w])
             return odom_msg
 
-        # Calcula translação e rotação incremental
+        # Calcula translacao e rotacao incremental
         dx = odom_msg.pose.pose.position.x - self.last_odom.pose.pose.position.x
         dy = odom_msg.pose.pose.position.y - self.last_odom.pose.pose.position.y
         trans = np.sqrt(dx ** 2 + dy ** 2)
@@ -98,7 +98,7 @@ class NoisyOdomPublisher(Node):
         rot1 = np.arctan2(dy, dx) - theta1
         rot2 = theta2 - theta1 - rot1
 
-        # Adiciona ruído baseado nos parâmetros \(\alpha\)
+        # Adiciona ruido baseado nos parametros \(\alpha\)
         sd_rot1 = self.alpha1 * abs(rot1) + self.alpha2 * trans
         sd_trans = self.alpha3 * trans + self.alpha4 * (abs(rot1) + abs(rot2))
         sd_rot2 = self.alpha1 * abs(rot2) + self.alpha2 * trans
@@ -108,8 +108,8 @@ class NoisyOdomPublisher(Node):
         rot2_noisy = rot2 + np.random.normal(0, sd_rot2)
 
         # Atualiza pose estimada
-        self.pose[0] += trans_noisy * np.cos(self.pose[2] + rot1_noisy)  # Correção para X
-        self.pose[1] += trans_noisy * np.sin(self.pose[2] + rot1_noisy)  # Correção para Y
+        self.pose[0] += trans_noisy * np.cos(self.pose[2] + rot1_noisy)
+        self.pose[1] += trans_noisy * np.sin(self.pose[2] + rot1_noisy)
         self.pose[2] += rot1_noisy + rot2_noisy
 
         # Cria mensagem de odometria ruidosa
